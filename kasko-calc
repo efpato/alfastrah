@@ -1,0 +1,204 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+import logging
+import os
+import optparse
+import signal
+
+import xlrd
+import xlsxwriter
+from selenium.webdriver import Firefox
+
+from pages import KaskoCalcPage
+
+
+PAGE_LOAD_TIMEOUT = 60
+
+logging.basicConfig(format=("%(asctime)s  %(levelname)-8s "
+                            "%(module)-15s %(message)s"),
+                    level=logging.DEBUG)
+logging.getLogger(
+    "selenium.webdriver.remote.remote_connection").setLevel(logging.WARNING)
+
+
+def load(filename):
+    logging.debug('Loading data from "%s"', filename)
+    workbook = xlrd.open_workbook(filename)
+    sheet = workbook.sheet_by_index(0)
+
+    data = []
+    if sheet.nrows > 1:
+        for row in range(sheet.nrows)[1:]:
+            data.append({
+                "city": sheet.cell_value(row, 0),
+                "brand": sheet.cell_value(row, 1),
+                "model": sheet.cell_value(row, 2),
+                "year": int(sheet.cell_value(row, 3)),
+                "cost": sheet.cell_value(row, 4),
+                "equipments_100km": sheet.cell_value(row, 5) == "Да",
+                "equipments_credit": sheet.cell_value(row, 6) == "Да",
+                "drivers_unlimited": sheet.cell_value(row, 7) == "Да",
+                "drivers_age": [
+                    int(float(age)) if age.count('.') == 1 else age
+                    for age in str(sheet.cell_value(row, 8)).split(';')
+                    if age
+                ],
+                "drivers_experience": [
+                    int(float(exp))
+                    for exp in str(sheet.cell_value(row, 9)).split(';')
+                    if exp
+                ],
+                "range_limit": sheet.cell_value(row, 10),
+                "franchise": (int(sheet.cell_value(row, 11))
+                              if str(sheet.cell_value(row, 11)) else ""),
+                "at_system": sheet.cell_value(row, 12)
+            })
+
+    logging.debug('Data has been loaded (%d rows)', len(data))
+
+    return data
+
+
+def report(filename, results):
+    logging.debug('Creating report ...')
+    workbook_in = xlrd.open_workbook(filename)
+    sheet_in = workbook_in.sheet_by_index(0)
+
+    out = "%s.out.xlsx" % os.path.basename(filename).split('.')[0]
+    workbook_out = xlsxwriter.Workbook(out)
+    sheet_out = workbook_out.add_worksheet()
+
+    for row in range(sheet_in.nrows):
+        for col in range(sheet_in.ncols):
+            sheet_out.write(row, col, sheet_in.cell_value(row, col))
+
+        col = sheet_in.ncols
+        if 0 < row <= len(results):
+            if not isinstance(results[row - 1], list):
+                sheet_out.write(row, col, results[row - 1])
+            else:
+                result = results[row - 1]
+                sheet_out.write(row, 4, result.pop(0))
+                for info in result:
+                    sheet_out.write(row, col, info)
+                    col += 1
+
+    workbook_out.close()
+    logging.debug('Report has been created: "%s"', out)
+
+
+def calculate(params):
+    logging.debug('Starting calculation: params => %s', params)
+
+    driver = None
+    result = None
+
+    for i in range(3):
+        if stopped:
+            break
+
+        logging.debug('Attempt #%d...', i + 1)
+
+        try:
+            driver = Firefox()
+            driver.maximize_window()
+            logging.debug('Firefox started')
+
+            driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
+            logging.debug('Set page_load_timeout=%d', PAGE_LOAD_TIMEOUT)
+
+            page = KaskoCalcPage(driver)
+            logging.debug('Opening "%s"', KaskoCalcPage.URL)
+            page.get(KaskoCalcPage.URL)
+
+            page.City(params["city"])
+            page.brand(params["brand"])
+            page.model(params["model"])
+            page.year(params["year"])
+            page.CarSet()
+            page.cost = params["cost"]
+            actual_cost = page.cost.get_attribute("value")
+            page.equipments_100km = params["equipments_100km"]
+            page.equipments_credit = params["equipments_credit"]
+            page.drivers_unlimited = params["drivers_unlimited"]
+            if params["drivers_unlimited"]:
+                page.colorbox_close()
+                page.drivers_min_age = params["drivers_age"][0]
+                page.drivers_min_experience = params["drivers_experience"][0]
+            else:
+                for j in range(len(params["drivers_age"])):
+                    if j > 0:
+                        page.add_driver.click()
+                    page.drivers_birthday(j, params["drivers_age"][j])
+                    page.drivers_experience(j, params["drivers_experience"][j])
+
+            page.select_options.click()
+            page.wait_preloader()
+
+            page.range_limit(params["range_limit"])
+            page.franchise(params["franchise"])
+            page.at_system = params["at_system"]
+            page.wait_preloader()
+
+            result = []
+            result.append(actual_cost)
+            for risk in page.risks:
+                info = "%s: " % risk.get_attribute("data-name")
+                risk.click()
+                page.wait_preloader()
+                for product in page.result:
+                    info += " %s=%s" % (product[0], product[1])
+                result.append(info)
+
+            break
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            logging.exception(e)
+            if i == 2:
+                result = "%s" % e
+                break
+        finally:
+            if driver is not None:
+                driver.quit()
+
+    logging.debug('Calculation has been finished. Result => %s', result)
+
+    return result
+
+
+stopped = False
+
+
+def main():
+    def sigint_handler(signum, frame):
+        global stopped
+
+        logging.info("Got signal: signum=%d, frame=%s", signum, frame)
+        stopped = True
+
+    signal.signal(signal.SIGINT, sigint_handler)
+
+    parser = optparse.OptionParser(usage="%prog <file>")
+    _, args = parser.parse_args()
+
+    if len(args) < 1:
+        parser.error("Invalid arguments")
+
+    filename = args[0]
+
+    if not os.path.exists(filename):
+        parser.error("File '%s' not exists" % filename)
+
+    results = []
+    for data in load(filename):
+        if stopped:
+            break
+        results.append(calculate(data))
+
+    report(filename, results)
+
+
+if __name__ == '__main__':
+    main()
