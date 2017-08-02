@@ -54,11 +54,11 @@ class KaskoCalcPage(PageObject):
             "Hide preloader timed out")
 
     def City(self, value):
+        self._fancybox_close()
         self.city.click()
         self.region = value
         PageElement(xpath="//ul[@class='regions']/li/a[text()='%s']" %
                     value).__get__(self, self.__class__).click()
-        self._fancybox_close()
 
     def brand(self, value):
         self.more_makers.click()
