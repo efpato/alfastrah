@@ -118,7 +118,8 @@ def calculate(params):
             page.year(params["year"])
             page.CarSet()
             page.cost = params["cost"]
-            actual_cost = page.cost.get_attribute("value")
+            actual_cost = (page.cost.get_attribute("value")
+                           if str(params["cost"]) else 0)
             page.equipments_100km = params["equipments_100km"]
             page.equipments_credit = params["equipments_credit"]
             page.drivers_unlimited = params["drivers_unlimited"]
